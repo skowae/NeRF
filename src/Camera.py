@@ -4,11 +4,18 @@ from mpl_toolkits.mplot3d import Axes3D
 
 # Helper function for the camera class
 def look_at_camera(eye, target, up=None):
+   # Make sure everything is a float
+   eye = eye.float()
+   target = target.float()
+
+   forward = target - eye
    forward = target - eye
    forward = forward / torch.norm(forward)
 
    if up is None:
       up = torch.tensor([0.0, 1.0, 0.0], dtype=eye.dtype, device=eye.device)
+   
+   up = up.float()
 
    if torch.abs(torch.dot(forward, up)) > 0.999:
       up = torch.tensor([0.0, 0.0, 1.0], dtype=eye.dtype, device=eye.device)
@@ -26,14 +33,18 @@ def look_at_camera(eye, target, up=None):
 
 # Camera abstraction used for visualization and modeling 
 class Camera:
-   def __init__(self, eye, target, focal, H, W, up=None):
+   def __init__(self, eye, target, focal, H, W, c2w=None, up=None):
       self.eye = eye
       self.target = target
       self.focal = focal
       self.H = H
       self.W = W
       self.up = up
-      self.c2w = look_at_camera(self.eye, self.target, self.up)
+      # Check if c2w is provided by the user 
+      if c2w != None:
+         self.c2w = c2w
+      else:
+         self.c2w = look_at_camera(self.eye, self.target, self.up)
 
    def get_rays(self):
       device = self.eye.device
