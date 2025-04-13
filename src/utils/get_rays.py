@@ -18,6 +18,52 @@ def compute_stable_up(eye, target):
    up = up_proj / torch.norm(up_proj)
    return up
 
+from typing import Tuple
+import torch
+import torch.nn.functional as F
+
+def evaluate_fake_radiance_field_complex(pts: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+   """
+   Computes RGB and density values for a composite synthetic object:
+   A torus with a sphere in the center.
+
+   Args:
+      pts (torch.Tensor): Sampled points along rays, shape [..., 3]
+
+   Returns:
+      Tuple of RGB values [..., 3] and density values [...].
+   """
+   # Extract coordinates
+   x, y, z = pts[..., 0], pts[..., 1], pts[..., 2]
+
+   # Define torus: center at origin, in the XY plane
+   R = 1.0  # major radius
+   r = 0.3  # minor radius
+   xy_r = torch.sqrt(x ** 2 + y ** 2)
+   torus_eq = torch.sqrt((xy_r - R) ** 2 + z ** 2)
+   torus_sigma = torch.exp(-((torus_eq - r) ** 2) * 40.0)
+
+   # Define inner sphere: center at origin
+   sphere_r = 0.4
+   sphere_eq = torch.sqrt(x ** 2 + y ** 2 + z ** 2)
+   sphere_sigma = torch.exp(-((sphere_eq - sphere_r) ** 2) * 60.0)
+
+   # Combine the two densities (use max for union)
+   sigma = torch.max(torus_sigma, sphere_sigma)
+
+   # Color: torus is red, sphere is blue
+   red = torch.tensor([1.0, 0.2, 0.2], device=pts.device)
+   blue = torch.tensor([0.2, 0.2, 1.0], device=pts.device)
+   
+   mask = (torus_sigma > sphere_sigma)[..., None]  # shape: (..., 1)
+   color = torch.where(mask, red, blue)
+
+   # Repeat color to match shape
+   rgb = color.expand_as(pts)
+
+   return rgb, sigma
+
+
 def evaluate_fake_radiance_field_sphere(pts):
    """
    Inputs:

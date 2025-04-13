@@ -1,5 +1,9 @@
 import os
 import sys
+
+# Add the parent directory (src/) to the path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import csv
 import torch
 import matplotlib.pyplot as plt
@@ -8,131 +12,147 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.image import imread
 from PIL import Image
 from Camera import Camera
-import models.NeRF as nerf_model
+from models.NeRF import NeRF
+from utils.get_rays import *
 
 def plot_loss_curve(log_path, save_dir):
-    """Plot the training loss from CSV log."""
-    epochs, losses = [], []
-    with open(log_path, 'r') as f:
-        reader = csv.reader(f)
-        next(reader)  # skip header
-        for row in reader:
-            epochs.append(int(row[0]))
-            losses.append(float(row[1]))
+   """Plot the training loss from CSV log."""
+   epochs, losses = [], []
+   with open(log_path, 'r') as f:
+      reader = csv.reader(f)
+      next(reader)  # skip header
+      for row in reader:
+         epochs.append(int(row[0]))
+         losses.append(float(row[1]))
 
-    plt.figure(figsize=(8, 4))
-    plt.plot(epochs, losses, label='Loss', color='blue')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training Loss Curve')
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    out_path = os.path.join(save_dir, "loss_curve.png")
-    plt.savefig(out_path)
-    print(f"Saved loss curve to {out_path}")
-    plt.close()
+   plt.figure(figsize=(8, 4))
+   plt.plot(epochs, losses, label='Loss', color='blue')
+   plt.xlabel('Epoch')
+   plt.ylabel('Loss')
+   plt.title('Training Loss Curve')
+   plt.grid(True)
+   plt.legend()
+   plt.tight_layout()
+   out_path = os.path.join(save_dir, "loss_curve.png")
+   plt.savefig(out_path)
+   print(f"Saved loss curve to {out_path}")
+   plt.close()
 
-def save_latest_preview_image(plots_dir, save_dir):
-    """Save a copy of the most recent rendered preview image."""
-    files = sorted([f for f in os.listdir(plots_dir) if f.endswith('.png') and 'epoch' in f])
-    if not files:
-        print("No preview images found.")
-        return None, None
+def render_rotating_gif(model, target, focal, device, save_dir, H=100, W=100, N=64, radius=2.0, steps=60):
+   """Render multiple views by rotating the camera and save a GIF."""
+   frames = []
+   target = target.to(device)
+   for theta in np.linspace(0, 2 * np.pi, steps):
+      eye = torch.tensor([
+         radius * np.cos(theta),  # X position
+         radius * np.sin(theta),  # Y position
+         2.0                      # Fixed Z height
+      ], dtype=torch.float32, device=device)
+      cam = Camera(eye=eye, target=target, focal=focal, H=H, W=W)
+      rays_o, rays_d = cam.get_rays()
+      
+      pts, z_vals = Camera.sample_points_along_rays(rays_o.to(device), rays_d.to(device), 2.0, 6.0, N)
+      pts_flat = pts.view(-1, 3)
+      
+      # Get the view directions
+      view_dirs = rays_d / rays_d.norm(dim=-1, keepdim=True)  # shape: [H, W, 3]
+      view_dirs_flat = view_dirs.view(-1, 3)
 
-    latest = files[-1]
-    src = os.path.join(plots_dir, latest)
-    dst = os.path.join(save_dir, "latest_preview.png")
-    img = imread(src)
+      # Expand view directions to match N_samples along rays
+      view_dirs_expanded = view_dirs[:, :, None, :].expand(H, W, N, 3)
+      view_dirs_flat = view_dirs_expanded.reshape(-1, 3)
 
-    plt.figure(figsize=(5, 5))
-    plt.imshow(img)
-    plt.title(f"Latest Render: {latest}")
-    plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(dst)
-    plt.close()
-    print(f"Saved preview image to {dst}")
+      with torch.no_grad():
+         rgb_flat, sigma_flat = model(pts_flat, view_dirs_flat)
+      rgb = rgb_flat.view(H, W, N, 3)
+      sigma = sigma_flat.view(H, W, N)
+      rgb_map, weights = Camera.volume_render(rgb, sigma, z_vals.to(device))
+      # rgb_map = torch.sum(weights[..., None] * rgb, dim=-2)
+      img = (rgb_map.clamp(0.0, 1.0).cpu().numpy() * 255).astype(np.uint8)
+      frames.append(Image.fromarray(img))
 
-    return dst, img
+   gif_path = os.path.join(save_dir, "rotating_view.gif")
+   frames[0].save(gif_path, save_all=True, append_images=frames[1:], duration=100, loop=0)
+   print(f"Saved rotating view GIF to {gif_path}")
 
-def plot_3d_rays_overlay(save_dir, image, eye, directions, num_rays=10):
-    """Overlay some sampled rays in 3D and save the result."""
-    fig = plt.figure(figsize=(8, 6))
-    ax = fig.add_subplot(111, projection='3d')
+@torch.no_grad()
+def render_model_image(model, cam, device, N_samples):
+   rays_o, rays_d = cam.get_rays()
+   H, W = rays_o.shape[:2]
 
-    for i in range(0, directions.shape[0], max(1, directions.shape[0] // num_rays)):
-        for j in range(0, directions.shape[1], max(1, directions.shape[1] // num_rays)):
-            d = directions[i, j]
-            x, y, z = eye.cpu().numpy()
-            dx, dy, dz = d.cpu().numpy()
-            ax.quiver(x, y, z, dx, dy, dz, length=2.0, color='r')
+   pts, z_vals = Camera.sample_points_along_rays(rays_o, rays_d, near=2.0, far=6.0, N_samples=N_samples)
+   pts_flat = pts.view(-1, 3)
 
-    ax.set_xlim([-3, 3])
-    ax.set_ylim([-3, 3])
-    ax.set_zlim([-3, 3])
-    ax.set_title("Example Ray Directions in 3D")
-    plt.tight_layout()
-    out_path = os.path.join(save_dir, "ray_overlay.png")
-    plt.savefig(out_path)
-    print(f"Saved 3D rays overlay to {out_path}")
-    plt.close()
+   view_dirs = rays_d / rays_d.norm(dim=-1, keepdim=True)
+   view_dirs_expanded = view_dirs[:, :, None, :].expand(H, W, N_samples, 3)
+   view_dirs_flat = view_dirs_expanded.reshape(-1, 3)
 
-def render_rotating_gif(model, target, focal, device, save_dir, H=100, W=100, radius=2.5, steps=60):
-    """Render multiple views by rotating the camera and save a GIF."""
-    frames = []
-    target = target.to(device)
-    for theta in np.linspace(0, 2 * np.pi, steps):
-        eye = torch.tensor([
-            radius * np.cos(theta),  # X position
-            radius * np.sin(theta),  # Y position
-            2.0                      # Fixed Z height
-        ], dtype=torch.float32, device=device)
-        cam = Camera(eye=eye, target=target, focal=focal, H=H, W=W)
-        rays_o, rays_d = cam.get_rays()
-        pts, z_vals = Camera.sample_points_along_rays(rays_o.to(device), rays_d.to(device), 2.0, 6.0, 64)
-        pts_flat = pts.view(-1, 3)
-        with torch.no_grad():
-            rgb_flat, sigma_flat = model(pts_flat)
-        rgb = rgb_flat.view(H, W, 64, 3)
-        sigma = sigma_flat.view(H, W, 64)
-        rgb_map, weights = Camera.volume_render(rgb, sigma, z_vals.to(device))
-        # rgb_map = torch.sum(weights[..., None] * rgb, dim=-2)
-        img = (rgb_map.clamp(0.0, 1.0).cpu().numpy() * 255).astype(np.uint8)
-        frames.append(Image.fromarray(img))
+   rgb_flat, sigma_flat = model(pts_flat.to(device), view_dirs_flat.to(device))
+   rgb = rgb_flat.view(H, W, N_samples, 3)
+   sigma = sigma_flat.view(H, W, N_samples)
+   rgb_map, _ = Camera.volume_render(rgb, sigma, z_vals.to(device))
+   return (rgb_map.clamp(0.0, 1.0).cpu().numpy() * 255).astype(np.uint8)
 
-    gif_path = os.path.join(save_dir, "rotating_view.gif")
-    frames[0].save(gif_path, save_all=True, append_images=frames[1:], duration=100, loop=0)
-    print(f"Saved rotating view GIF to {gif_path}")
+def render_gt_image(cam_preview, device, N_render):
+   # Use the final eye and target used for preview image generation
+   rays_o, rays_d = cam_preview.get_rays()
+   pts, z_vals = Camera.sample_points_along_rays(rays_o.to(device), rays_d.to(device), 2.0, 6.0, N_render)
+   rgb_gt_preview, sigma_gt_preview = evaluate_fake_radiance_field_complex(pts)
+   rgb_map_gt, weights = Camera.volume_render(rgb_gt_preview, sigma_gt_preview, z_vals)
 
-def analyze_result_dir(result_dir, eye=None, directions=None, model=None, focal=None, target=None, device=None):
-    """Run all default post-training analysis routines."""
-    log_path = os.path.join(result_dir, "log", "log.csv")
-    plots_dir = os.path.join(result_dir, "plots")
-    analysis_dir = os.path.join(plots_dir, "analysis")
-    os.makedirs(analysis_dir, exist_ok=True)
+   # Save the ground truth image
+   gt_img = (rgb_map_gt.clamp(0.0, 1.0).cpu().numpy() * 255).astype(np.uint8)
+   return gt_img
 
-    print("\n--- Post-training Analysis ---")
-    plot_loss_curve(log_path, analysis_dir)
-    preview_path, img = save_latest_preview_image(plots_dir, analysis_dir)
+def evaluate_trained_model(result_dir, model, cam, device, N_samples=64):
+   model = model.to(device)
+   model.eval()
 
-    if preview_path and eye is not None and directions is not None:
-        plot_3d_rays_overlay(analysis_dir, img, eye, directions)
+   output_dir = os.path.join(result_dir, "plots", "evaluation")
+   os.makedirs(output_dir, exist_ok=True)
 
-    if all(x is not None for x in [model, focal, target, device]):
-        render_rotating_gif(model, target, focal, device, analysis_dir)
+   # Render GT and model output
+   print("Rendering ground truth image...")
+   gt_img = render_gt_image(cam, device, N_samples)
+   Image.fromarray(gt_img).save(os.path.join(output_dir, "ground_truth.png"))
+
+   print("Rendering model image...")
+   pred_img = render_model_image(model, cam, device, N_samples)
+   Image.fromarray(pred_img).save(os.path.join(output_dir, "model_render.png"))
+
+   # Plot loss
+   print("Plotting loss curve...")
+   log_path = os.path.join(result_dir, "log", "log.csv")
+   plot_loss_curve(log_path, output_dir)
+
+   # Render rotating gif
+   print("Rendering rotating gif...")
+   render_rotating_gif(model, target=cam.target, focal=cam.focal, device=device, save_dir=output_dir,
+                     H=cam.H, W=cam.W, N=N_samples, steps=60)
+
+   print(f"Evaluation complete. Outputs saved in {output_dir}")
 
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        print("Usage: python analyze_results.py <path_to_result_dir>")
-        sys.exit(1)
+   if len(sys.argv) != 2:
+      print("Usage: python analyze_results.py <path_to_result_dir>")
+      sys.exit(1)
 
-    analyze_result_dir(
-        sys.argv[1],
-        eye=None,
-        directions=None,
-        model=None,
-        focal=None,
-        target=None,
-        device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    )
+   H=100
+   W=100
+   focal=100
+   device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+   eye = torch.tensor([1.0, 1.0, 2.0], dtype=torch.float32, device=device)
+   target = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=device)
+
+   cam = Camera(eye=eye, target=target, focal=focal, H=H, W=W)
+   
+   model = NeRF().to(device)
+   model.load_state_dict(torch.load('/home/skowae1/JHU_EP/dlcv/NeRF/src/results/20250412-115020/weights/best.pt', map_location=device))
+   
+   evaluate_trained_model(
+      sys.argv[1],
+      model,
+      cam,
+      device,
+      N_samples=64
+   )

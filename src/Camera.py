@@ -65,17 +65,28 @@ class Camera:
    @staticmethod
    def volume_render(rgb, sigma, z_vals):
       device = rgb.device
+      
+      # Move everything to same device
+      sigma = sigma.to(device)
+      z_vals = z_vals.to(device)
+      
       H, W, N_samples = sigma.shape
 
       dists = z_vals[..., 1:] - z_vals[..., :-1]
       dists = torch.cat([dists, torch.full_like(dists[..., :1], 1e10)], dim=-1)
 
       alpha = 1.0 - torch.exp(-sigma * dists)
+      
+      ones = torch.ones((H, W, 1), device=device)
+      eps = torch.tensor(1e-10, device=device)
+      one = torch.tensor(1.0, device=device)
+         
       T = torch.cumprod(torch.cat([
-         torch.ones((H, W, 1), device=device),
-         1.0 - alpha + 1e-10
+         ones,
+         one - alpha + eps
+    
       ], dim=-1), dim=-1)[..., :-1]
-
+      
       weights = alpha * T
       final_rgb = torch.sum(weights[..., None] * rgb, dim=-2)
 

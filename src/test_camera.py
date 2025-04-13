@@ -2,7 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 from Camera import Camera
 from models.NeRF import NeRF
-from get_rays import evaluate_fake_radiance_field_torus
+from utils.get_rays import evaluate_fake_radiance_field_torus
 
 def main():
    # Image and camera parameters
