@@ -33,30 +33,36 @@ def look_at_camera(eye, target, up=None):
 
 # Camera abstraction used for visualization and modeling 
 class Camera:
-   def __init__(self, eye, target, focal, H, W, c2w=None, up=None):
+   def __init__(self, eye, target, focal, H, W, c2w=None, pp=None, up=None):
       self.eye = eye
       self.target = target
-      self.focal = focal
+      self.focal = focal # (fx, fy)
       self.H = H
       self.W = W
+      self.principal_point = pp
       self.up = up
       # Check if c2w is provided by the user 
-      if c2w != None:
+      if c2w is not None:
          self.c2w = c2w
       else:
          self.c2w = look_at_camera(self.eye, self.target, self.up)
 
    def get_rays(self):
       device = self.eye.device
-      i, j = torch.meshgrid(
-         torch.arange(self.W, dtype=torch.float32, device=device),
+      j, i = torch.meshgrid(
          torch.arange(self.H, dtype=torch.float32, device=device),
+         torch.arange(self.W, dtype=torch.float32, device=device),
          indexing='ij'
       )
+      
+      if self.principal_point is not None:
+         cx, cy = self.principal_point
+      else:
+         cx, cy = self.W*0.5, self.H*0.5
 
       dirs = torch.stack([
-         (i - self.W * 0.5) / self.focal,
-         -(j - self.H * 0.5) / self.focal,
+         (i - cx) / self.focal[0],
+         -(j - cy) / self.focal[1],
          torch.ones_like(i)
       ], dim=-1)
 
@@ -67,9 +73,19 @@ class Camera:
       return rays_o, rays_d
 
    @staticmethod
-   def sample_points_along_rays(rays_o, rays_d, near, far, N_samples):
+   def sample_points_along_rays(rays_o, rays_d, near, far, N_samples, perturb=True):
       H, W = rays_o.shape[:2]
       z_vals = torch.linspace(near, far, N_samples, device=rays_o.device).view(1, 1, N_samples).expand(H, W, N_samples)
+      
+      if perturb:
+         # Add noise to z_vals (stratified sampling)
+         mids = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])  # midpoint between samples
+         upper = torch.cat([mids, z_vals[..., -1:]], dim=-1)
+         lower = torch.cat([z_vals[..., :1], mids], dim=-1)
+         t_rand = torch.rand_like(z_vals)
+         z_vals = lower + (upper - lower) * t_rand
+         z_vals, _ = torch.sort(z_vals, dim=-1)
+   
       pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
       return pts, z_vals
 

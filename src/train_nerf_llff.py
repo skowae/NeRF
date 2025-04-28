@@ -28,13 +28,14 @@ def compute_ssim(img1, img2):
    )
 
 # === Render Utility for Evaluation and Preview ===
-def render_image(model, rays_o, rays_d, device, N_samples=64, chunk_size=2048):
+def render_image(model, rays_o, rays_d, device, perturb=True, N_samples=64, chunk_size=2048):
    """Render full image with chunking."""
    rays_o = rays_o.to(device)
    rays_d = rays_d.to(device)
 
    # Sample points along rays
-   pts, z_vals = Camera.sample_points_along_rays(rays_o, rays_d, near=2.0, far=6.0, N_samples=N_samples)
+   pts, z_vals = Camera.sample_points_along_rays(rays_o, rays_d, near=2.0, far=6.0, N_samples=N_samples, perturb=perturb)
+            
    view_dirs = rays_d / rays_d.norm(dim=-1, keepdim=True)
    view_dirs_expanded = view_dirs[..., None, :].expand_as(pts)
 
@@ -65,7 +66,7 @@ def render_image(model, rays_o, rays_d, device, N_samples=64, chunk_size=2048):
 
 # === Main Training Function ===
 def train():
-   epochs = 2001
+   epochs = 500
    data_dir = "./data/llff/testscene"
    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
    # Load LLFF training and validation datasets
@@ -78,7 +79,7 @@ def train():
    H, W, focal = dataset.H, dataset.W, dataset.focal
    # Initialize NeRF model and optimizer
    model = NeRF().to(device)
-   optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
+   optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-6)
    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
 
    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -109,7 +110,7 @@ def train():
          cam = Camera(eye=pose[:, 3], target=None, focal=focal, H=H, W=W, c2w=pose)
          rays_o, rays_d = cam.get_rays()
          
-         rgb_map = render_image(model, rays_o, rays_d, device)
+         rgb_map = render_image(model, rays_o, rays_d, device, perturb=True)
          # print(f"Size of gt = {rgb_gt.shape}, size of model output map = {rgb_map.shape}")
 
          loss = F.mse_loss(rgb_map, rgb_gt)
@@ -129,7 +130,7 @@ def train():
          cam = Camera(eye=pose[:, 3], target=None, focal=focal, H=H, W=W, c2w=pose)
          rays_o, rays_d = cam.get_rays()
          
-         rgb_map = render_image(model, rays_o, rays_d, device)
+         rgb_map = render_image(model, rays_o, rays_d, device, perturb=False)
 
          val_loss = F.mse_loss(rgb_map, rgb_gt)
          val_losses.append(val_loss.item())
@@ -173,7 +174,7 @@ def train():
          cam = Camera(eye=pose[:, 3], target=None, focal=focal, H=H, W=W, c2w=pose)
          rays_o, rays_d = cam.get_rays()
          
-         rgb_map = render_image(model, rays_o, rays_d, device)
+         rgb_map = render_image(model, rays_o, rays_d, device, perturb=True)
          
          img = (rgb_map.clamp(0.0, 1.0).detach().cpu().numpy() * 255).astype(np.uint8)
          img = np.transpose(img, (1, 0, 2))

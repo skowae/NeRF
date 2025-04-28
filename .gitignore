@@ -176,3 +176,11 @@ cython_debug/
 
 # Serialization
 *.pt
+
+# images 
+*.png
+*.jpeg
+*.jpg
+*.JPG
+*.JPEG
+*.PNG

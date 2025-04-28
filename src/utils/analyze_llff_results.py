@@ -17,24 +17,30 @@ from skimage.metrics import peak_signal_noise_ratio as psnr_metric
 from models.NeRF import NeRF
 from Camera import Camera
 from data.LLFFDataset import LLFFDataset
-from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation as R, Slerp
 
-def interpolate_pose(c2w1, c2w2, t):
+def interpolate_pose(pose1, pose2, t):
    # Split into rotation + translation
-   R1 = R.from_matrix(c2w1[:3, :3].cpu().numpy())
-   R2 = R.from_matrix(c2w2[:3, :3].cpu().numpy())
-   T1 = c2w1[:3, 3]
-   T2 = c2w2[:3, 3]
+   R1 = R.from_matrix(pose1[:3, :3].cpu().numpy())
+   R2 = R.from_matrix(pose2[:3, :3].cpu().numpy())
+   
+   # SLERP setup
+   key_times = [0, 1]
+   key_rots = R.concatenate([R1, R2])
+   slerp = Slerp(key_times, key_rots)
+   R_interp = slerp(t).as_matrix()  # Interpolated rotation
 
-   # Slerp rotation
-   R_interp = R1.slerp(t, R2).as_matrix()
+   # Linearly interpolate translation
+   T1 = pose1[:3, 3]
+   T2 = pose2[:3, 3]
    T_interp = (1 - t) * T1 + t * T2
 
-   # Combine
-   c2w_interp = torch.eye(4, device=c2w1.device)
-   c2w_interp[:3, :3] = torch.tensor(R_interp, device=c2w1.device)
-   c2w_interp[:3, 3] = T_interp
-   return c2w_interp[:3, :]
+   # Construct full 3x4 interpolated pose
+   pose_interp = np.eye(4, dtype=np.float32)
+   pose_interp[:3, :3] = R_interp
+   pose_interp[:3, 3] = T_interp.cpu().numpy()
+
+   return pose_interp[:3]  # Return as 3x4
 
 def plot_learning_curve(log_path, save_path=None):
    """
@@ -97,7 +103,7 @@ def render_from_model(model, rays_o, rays_d, device, N_samples=64, chunk_size=20
    rays_d = rays_d.to(device)
 
    # Sample points along rays
-   pts, z_vals = Camera.sample_points_along_rays(rays_o, rays_d, near=2.0, far=6.0, N_samples=N_samples)
+   pts, z_vals = Camera.sample_points_along_rays(rays_o, rays_d, near=2.0, far=6.0, N_samples=N_samples, perturb=False)
    view_dirs = rays_d / rays_d.norm(dim=-1, keepdim=True)
    view_dirs_expanded = view_dirs[..., None, :].expand_as(pts)
 
@@ -125,37 +131,72 @@ def render_from_model(model, rays_o, rays_d, device, N_samples=64, chunk_size=20
 
    return rgb_map
 
+# def render_rotating_gif_llff_poses(model, dataset, save_dir, device, every_n=1, N_samples=64):
+#    """Render a GIF using real camera poses from the LLFF dataset."""
+      
+#    frames = []
+#    os.makedirs(save_dir, exist_ok=True)
+
+#    print(f"Generating rotating view GIF from {len(dataset.poses)} poses...")
+
+#    for i in range(0, len(dataset.poses), every_n):
+#       sample = dataset[i]
+#       rgb_gt, pose, focal, H, W, bounds = sample
+
+#       # Only call `.to(device)` on tensors
+#       pose = pose
+      
+#       cam = Camera(eye=pose[:, 3], target=None, focal=focal, H=H, W=W, c2w=pose)
+#       rays_o, rays_d = cam.get_rays()
+      
+#       rgb_map = render_from_model(model, rays_o.to(device), rays_d.to(device), device)
+      
+#       img = (rgb_map.clamp(0.0, 1.0).detach().cpu().numpy() * 255).astype(np.uint8)
+#       img = np.transpose(img, (1, 0, 2))
+#       frames.append(Image.fromarray(img))
+      
+#       torch.cuda.empty_cache()
+
+#    gif_path = os.path.join(save_dir, "rotating_llff.gif")
+#    frames[0].save(gif_path, save_all=True, append_images=frames[1:], duration=100, loop=0)
+#    print(f"Saved LLFF trajectory GIF to {gif_path}")
+
 def render_rotating_gif_llff_poses(model, dataset, save_dir, device, every_n=1, N_samples=64):
    """Render a GIF using real camera poses from the LLFF dataset."""
+   
+   # Extract all of the poses
+   c2ws = torch.stack([torch.from_numpy(pose) for pose in dataset.poses]).to(device)
       
    frames = []
    os.makedirs(save_dir, exist_ok=True)
 
    print(f"Generating rotating view GIF from {len(dataset.poses)} poses...")
 
-   for i in range(0, len(dataset.poses), every_n):
-      sample = dataset[i]
-      rgb_gt, pose, focal, H, W, bounds = sample
-
-      # Only call `.to(device)` on tensors
-      pose = pose
-      
-      cam = Camera(eye=pose[:, 3], target=None, focal=focal, H=H, W=W, c2w=pose)
-      rays_o, rays_d = cam.get_rays()
-      
-      rgb_map = render_from_model(model, rays_o.to(device), rays_d.to(device), device)
-      
-      img = (rgb_map.clamp(0.0, 1.0).detach().cpu().numpy() * 255).astype(np.uint8)
-      img = np.transpose(img, (1, 0, 2))
-      frames.append(Image.fromarray(img))
-      
-      torch.cuda.empty_cache()
+   frames = []
+   steps = 40
+   
+   print(f"Steps {steps}, len(c2ws)-1 {len(c2ws) - 1}.  Quotient {steps // (len(c2ws) - 1)}")
+   for i in range(len(c2ws) - 1):
+      for j in range(steps // (len(c2ws) - 1)):
+         t = j / (steps // (len(c2ws) - 1))
+         
+         c2w = interpolate_pose(c2ws[i], c2ws[i+1], t)
+         c2w = torch.tensor(c2w)
+         cam = Camera(eye=c2w[:, 3], target=None, H=dataset.H, W=dataset.W, focal=dataset.focal, c2w=c2w)
+         
+         rays_o, rays_d = cam.get_rays()
+         rgb_map = render_from_model(model, rays_o, rays_d, device)
+         
+         img = (rgb_map.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+         img = np.transpose(img, (1, 0, 2))
+         
+         frames.append(Image.fromarray(img))
+         
+         torch.cuda.empty_cache()
 
    gif_path = os.path.join(save_dir, "rotating_llff.gif")
    frames[0].save(gif_path, save_all=True, append_images=frames[1:], duration=100, loop=0)
    print(f"Saved LLFF trajectory GIF to {gif_path}")
-
-
 
 def evaluate_real_scene(result_dir, data_dir, image_idx=0, N_samples=64, near=2.0, far=6.0):
    """
