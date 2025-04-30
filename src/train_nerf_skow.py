@@ -18,16 +18,17 @@ from utils.analyze_capture_results import *
 def main():
    # Configuration 
    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-   scene_dir = './data/skow/fern'
+   scene_dir = './data/skow/robot'
    img_wh = (100, 75)
    batch_size = 1
    lr = 5e-4
    weight_decay = 1e-6
    gamma = 0.5
-   epochs = 500
+   epochs = 300
    N_samples = 64
-   near = 0.1
-   far = 4.0
+   near = 0.25
+   far = 0.75
+   perturb = False
    
    # Create the outpur dirs
    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -46,7 +47,7 @@ def main():
    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=gamma)
    
-   train(model, device, optimizer, scheduler, dataloader, epochs, N_samples, near, far, out_dir)
+   train(model, device, optimizer, scheduler, dataloader, epochs, N_samples, near, far, out_dir, perturb)
    
    evaluate_real_scene(out_dir, scene_dir, image_idx=0, N_samples=64, near=near, far=far)
 
@@ -62,14 +63,14 @@ def compute_ssim(img1, img2):
       data_range=1.0
    )
 
-def render_image(model, rays_o, rays_d, device, perturb=True, N_samples=64, chunk_size=2048):
+def render_image(model, rays_o, rays_d, device, perturb=True, near=0.1, far=4.0, N_samples=64, chunk_size=2048):
    """Render full image with chunking."""
    
    rays_o = rays_o.to(device)
    rays_d = rays_d.to(device)
 
    # Sample points along rays
-   pts, z_vals = Camera.sample_points_along_rays(rays_o, rays_d, near=0.1, far=4.0, N_samples=N_samples, perturb=perturb)
+   pts, z_vals = Camera.sample_points_along_rays(rays_o, rays_d, near=near, far=far, N_samples=N_samples, perturb=perturb)
             
    view_dirs = rays_d / rays_d.norm(dim=-1, keepdim=True)
    view_dirs_expanded = view_dirs[..., None, :].expand_as(pts)
@@ -98,7 +99,7 @@ def render_image(model, rays_o, rays_d, device, perturb=True, N_samples=64, chun
 
    return rgb_map
 
-def train(model, device, optimizer, scheduler, dataloader, epochs, N_samples, near, far, results_dir):
+def train(model, device, optimizer, scheduler, dataloader, epochs, N_samples, near, far, results_dir, perturb):
    """Training loop
 
    Args:
@@ -145,7 +146,7 @@ def train(model, device, optimizer, scheduler, dataloader, epochs, N_samples, ne
          rays_o, rays_d = cam.get_rays()
          
          # Render image
-         rgb_map = render_image(model, rays_o, rays_d, device, perturb=True)
+         rgb_map = render_image(model, rays_o, rays_d, device, perturb=perturb, near=near, far=far)
 
          # Compute the loss
          rgb_gt = img.squeeze(0).permute(1, 2, 0) # (H, W, 3)
@@ -181,7 +182,7 @@ def train(model, device, optimizer, scheduler, dataloader, epochs, N_samples, ne
       #    rays_o, rays_d = cam.get_rays()
          
       #    # Render image
-      #    rgb_map = render_image(model, rays_o, rays_d, device, perturb=False)
+      #    rgb_map = render_image(model, rays_o, rays_d, device, perturb=False, near=near, far=far)
 
       #    # Compute the loss
       #    rgb_gt = img.squeeze(0).permute(1, 2, 0) # (H, W, 3)
@@ -232,7 +233,7 @@ def train(model, device, optimizer, scheduler, dataloader, epochs, N_samples, ne
          rays_o, rays_d = cam.get_rays()
          
          model.eval()
-         rgb_map = render_image(model, rays_o, rays_d, device, perturb=False)
+         rgb_map = render_image(model, rays_o, rays_d, device, perturb=False, near=near, far=far)
          
          img = (rgb_map.clamp(0.0, 1.0).detach().cpu().numpy() * 255).astype(np.uint8)
          Image.fromarray(img).save(os.path.join(results_dir, "plots", f"epoch_{epoch:03d}.png"))

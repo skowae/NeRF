@@ -14,7 +14,7 @@ from PIL import Image
 from skimage.metrics import structural_similarity as ssim_metric
 from skimage.metrics import peak_signal_noise_ratio as psnr_metric
 
-from models.FastMLPNeRF import FastMLPNeRF
+from models.FastNGPNeRF import FastNGPNeRF
 from Camera import Camera
 from data.nerf_capture_dataset import NeRFCaptureDataset
 from scipy.spatial.transform import Rotation as R, Slerp
@@ -97,17 +97,20 @@ def plot_learning_curve(log_path, save_path=None):
 
    plt.close()
 
-def render_from_model(model, rays_o, rays_d, device, N_samples=64, chunk_size=2048):
+def render_from_model(model, rays_o, rays_d, device, near=0.1, far=4, N_samples=64, chunk_size=2048, scene_center=None, scene_scale=None):
    """Render full image with chunking."""
+   assert near is not None and far is not None, "Must Pass near and far explicitly"
+   
    rays_o = rays_o.to(device)
    rays_d = rays_d.to(device)
 
    # Sample points along rays
-   pts, z_vals = Camera.sample_points_along_rays(rays_o, rays_d, near=0.1, far=4, N_samples=N_samples, perturb=False)
+   pts, z_vals = Camera.sample_points_along_rays(rays_o, rays_d, near=near, far=far, N_samples=N_samples, perturb=False)
    view_dirs = rays_d / rays_d.norm(dim=-1, keepdim=True)
    view_dirs_expanded = view_dirs[..., None, :].expand_as(pts)
 
    # Flatten for chunked forward
+   pts = (pts - scene_center)/scene_scale
    pts_flat = pts.reshape(-1, 3)
    view_dirs_flat = view_dirs_expanded.reshape(-1, 3)
 
@@ -128,12 +131,19 @@ def render_from_model(model, rays_o, rays_d, device, N_samples=64, chunk_size=20
    # print(f"render_image: shape of rgb {rgb.shape}, shape of sigma {sigma.shape}, z_vals {z_vals.shape}")
    rgb_map, weights = Camera.volume_render(rgb, sigma, z_vals.to(device))
    # rgb_map = torch.sum(weights[..., None] * rgb, dim=-2)
+   
+   # print("EVAL")
+   # print("RGB output stats:", rgb_map.min().item(), rgb_map.max().item())
+   # print("Sigma output stats:", sigma.min().item(), sigma.max().item())
 
    return rgb_map
 
 
-def render_rotating_gif_capture_poses(model, dataset, save_dir, device, every_n=1, N_samples=64):
+def render_rotating_gif_capture_poses(model, dataset, save_dir, device, near=0.1, far=4.0, every_n=1, N_samples=64):
    """Render a GIF using real camera poses from the LLFF dataset."""
+   
+   scene_center = dataset.scene_center.to(device)
+   scene_scale = dataset.scene_scale.to(device)
    
    # Extract all of the poses
    c2ws = torch.stack([pose.squeeze(0) for pose in dataset.poses]).to(device)
@@ -174,7 +184,7 @@ def render_rotating_gif_capture_poses(model, dataset, save_dir, device, every_n=
          
          with torch.no_grad():
             rays_o, rays_d = cam.get_rays()
-            rgb_map = render_from_model(model, rays_o, rays_d, device)
+            rgb_map = render_from_model(model, rays_o, rays_d, device, near, far, scene_center=scene_center, scene_scale=scene_scale)
             
             img = (rgb_map.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)         
             frames.append(Image.fromarray(img))
@@ -199,17 +209,25 @@ def evaluate_real_scene(result_dir, data_dir, image_idx=0, N_samples=64, near=0.
    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
    # Load model and weights
-   model = FastMLPNeRF().to(device)
+   model = FastNGPNeRF().to(device)
    weights_dir = os.path.join(result_dir, "weights")
    weights = sorted([f for f in os.listdir(weights_dir) if f.endswith(".pt")])
    if not weights:
       print("No weights found.")
+      print("Cleaning up GPU memory...")
+      torch.cuda.empty_cache()
+      gc.collect()
+      # Optionally delete large objects
+      del model
       return
    best_weights = weights[-1]
    model.load_state_dict(torch.load(os.path.join(weights_dir, best_weights), map_location=device))
    model.eval()
 
-   dataset = NeRFCaptureDataset(scene_dir=data_dir, split='train')
+   dataset = NeRFCaptureDataset(scene_dir=data_dir, split='train', subset=None)
+   
+   scene_center = dataset.scene_center.to(device)
+   scene_scale = dataset.scene_scale.to(device)
    
    sample = dataset[0]
    rgb_gt, pose, focal, pp, img_wh = sample
@@ -228,22 +246,18 @@ def evaluate_real_scene(result_dir, data_dir, image_idx=0, N_samples=64, near=0.
    rays_o, rays_d = cam.get_rays()
    
    with torch.no_grad():
-      rgb_map = render_from_model(model, rays_o, rays_d, device)
+      rgb_map = render_from_model(model, rays_o, rays_d, device, near, far, scene_center=scene_center, scene_scale=scene_scale)
    
-   img = (rgb_map.clamp(0.0, 1.0).detach().cpu().numpy() * 255).astype(np.uint8)
-
    # Save outputs
    out_dir = os.path.join(result_dir, "plots", "real_eval")
    os.makedirs(out_dir, exist_ok=True)
 
    # GT image
-   gt_img_uint8 = (image_gt_np * 255).astype(np.uint8)
-   gt_img_uint8 = np.transpose(gt_img_uint8, (1, 2, 0))
-   
+   gt_img_uint8 = (image_gt_np.transpose(1, 2, 0) * 255).astype(np.uint8)
    Image.fromarray(gt_img_uint8).save(os.path.join(out_dir, "gt_image.png"))
 
    # Prediction image
-   pred_img_uint8 = (img).astype(np.uint8)
+   pred_img_uint8 = (rgb_map.clamp(0.0, 1.0).detach().cpu().numpy() * 255).astype(np.uint8)
    Image.fromarray(pred_img_uint8).save(os.path.join(out_dir, "pred_image.png"))
 
    # Side-by-side
@@ -252,14 +266,14 @@ def evaluate_real_scene(result_dir, data_dir, image_idx=0, N_samples=64, near=0.
    print(f"Saved evaluation images to {out_dir}")
    
    # Free GPU memory before gif rendering
-   del rays_o, rays_d, rgb_map, img
+   del rays_o, rays_d, rgb_map, pred_img_uint8
    torch.cuda.empty_cache()
 
    gc.collect()
    
    # Gif
    with torch.no_grad():
-      render_rotating_gif_capture_poses(model, dataset, save_dir=out_dir, device=device)
+      render_rotating_gif_capture_poses(model, dataset, save_dir=out_dir, device=device, near=near, far=far)
    
    # Learning curve
    log_path = os.path.join(result_dir, "log", "log.csv")
@@ -272,6 +286,6 @@ if __name__ == '__main__':
       print("Usage: python analyze_results_real.py <result_dir>")
       sys.exit(1)
 
-   data_dir = "./data/skow/fern"
+   data_dir = "./data/skow/robot"
    result_dir = sys.argv[1]
-   evaluate_real_scene(result_dir, data_dir, image_idx=0, N_samples=64, near=0.1, far=4.0)
+   evaluate_real_scene(result_dir, data_dir, image_idx=0, N_samples=64, near=0.1, far=1.0)

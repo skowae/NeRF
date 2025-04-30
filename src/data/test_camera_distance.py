@@ -1,7 +1,7 @@
 import json
 import numpy as np
 
-with open('skow/fern/transforms.json', 'r') as f:
+with open('skow/robot/transforms.json', 'r') as f:
     meta = json.load(f)
 
 positions = []

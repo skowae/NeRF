@@ -76,7 +76,6 @@ class Camera:
    def sample_points_along_rays(rays_o, rays_d, near, far, N_samples, perturb=True):
       H, W = rays_o.shape[:2]
       z_vals = torch.linspace(near, far, N_samples, device=rays_o.device).view(1, 1, N_samples).expand(H, W, N_samples)
-      
       if perturb:
          # Add noise to z_vals (stratified sampling)
          mids = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])  # midpoint between samples

@@ -1,5 +1,6 @@
 import os
 import json
+import random
 import torch
 import numpy as np
 from torch.utils.data import Dataset
@@ -8,7 +9,7 @@ import torchvision.transforms as T
 
 # Define the NeRFCapture dataset class
 class NeRFCaptureDataset(Dataset):
-   def __init__(self, scene_dir, split='train', img_wh=(100, 75), transform=None):
+   def __init__(self, scene_dir, split='train', img_wh=(100, 75), transform=None, subset=None):
       super().__init__()
       
       self.scene_dir = scene_dir
@@ -29,21 +30,38 @@ class NeRFCaptureDataset(Dataset):
       self.w = []
       self.h = []
       
+      frames = self.meta["frames"]
+      
+      if subset is not None:
+         frames = random.sample(frames, subset)
+      
+      self.frames = frames
+      
       # Loop through the frames
-      for frame in self.meta['frames']:
+      for frame in self.frames:
          fname = os.path.join(scene_dir, frame['file_path'] + ".png")
          self.image_paths.append(fname)
-         self.poses.append(np.array(frame['transform_matrix'], dtype=np.float32))
          self.cx.append(frame["cx"])
          self.cy.append(frame["cy"])
          self.fl_x.append(frame["fl_x"])
          self.fl_y.append(frame["fl_y"])
          self.w.append(frame["w"])
          self.h.append(frame["h"])
+      
+      self.poses = [torch.from_numpy(np.array(frame["transform_matrix"])).float() for frame in self.frames]
+      # Normalize poses to a unit sphere
+      centers = torch.stack([pose[:3, 3] for pose in self.poses]) # (N, 3)
+      scene_center = centers.mean(0)
+      dists = (centers - scene_center).norm(dim=-1)
+      scene_scale = 1.2*dists.max() # Scaling by factor of 1.2
+      
+      for pose in self.poses:
+         pose[:3, 3] = (pose[:3, 3] - scene_center)/scene_scale
          
-      # (N, 4, 4)
-      self.poses = torch.tensor(np.stack(self.poses))
-      self.N_images = len(self.image_paths)
+      self.scene_center = scene_center
+      self.scene_scale = scene_scale
+      
+      self.N_images = len(self.frames)
       
       # Set up a simple trnasform if none is provided
       if self.transform is None:
