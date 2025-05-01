@@ -42,6 +42,33 @@ def interpolate_pose(pose1, pose2, t):
 
    return pose_interp[:3]  # Return as 3x4
 
+def renormalize_pose(pose, scene_center, scene_scale, already_unit=True):
+   """Renormalized interpolated poses
+
+   Args:
+       pose (4,4): torch / np tensor in unit space (end-points already are)
+       already_unit (bool, optional): if True we only snap back inside radius 1
+       when ||t|| > 1. Defaults to True.
+   Returns:
+      pose_out (4, 4): tesnor with t in unit-sphere
+   """
+   if not torch.is_tensor(pose):
+      pose = torch.tensor(pose)
+      
+   t = pose[:3, 3]
+   if already_unit and t.norm() <= 1.0:
+      print("Endpoint returning pose as is")
+      return pose
+   
+   print("Renormalizing the pose")
+   
+   # Project back onto / inside the unit sphere
+   t_world = t*scene_scale + scene_center
+   t_unit = (t_world - scene_center)/scene_scale
+   pose_out = pose.clone()
+   pose_out[:3, 3] = t_unit
+   return pose_out
+
 def plot_learning_curve(log_path, save_path=None):
    """
    Plots the training and validation loss/SSIM/PSNR curves from the CSV log.
@@ -97,7 +124,7 @@ def plot_learning_curve(log_path, save_path=None):
 
    plt.close()
 
-def render_from_model(model, rays_o, rays_d, device, near=0.1, far=4, N_samples=64, chunk_size=2048, scene_center=None, scene_scale=None):
+def render_from_model(model, rays_o, rays_d, device, near=0.1, far=4, N_samples=64, chunk_size=16384):
    """Render full image with chunking."""
    assert near is not None and far is not None, "Must Pass near and far explicitly"
    
@@ -110,7 +137,6 @@ def render_from_model(model, rays_o, rays_d, device, near=0.1, far=4, N_samples=
    view_dirs_expanded = view_dirs[..., None, :].expand_as(pts)
 
    # Flatten for chunked forward
-   pts = (pts - scene_center)/scene_scale
    pts_flat = pts.reshape(-1, 3)
    view_dirs_flat = view_dirs_expanded.reshape(-1, 3)
 
@@ -130,7 +156,7 @@ def render_from_model(model, rays_o, rays_d, device, near=0.1, far=4, N_samples=
 
    # print(f"render_image: shape of rgb {rgb.shape}, shape of sigma {sigma.shape}, z_vals {z_vals.shape}")
    rgb_map, weights = Camera.volume_render(rgb, sigma, z_vals.to(device))
-   # rgb_map = torch.sum(weights[..., None] * rgb, dim=-2)
+   # rgb_map = torch.sum(weights[..., None] * rgb, dim=-2)already_unit
    
    # print("EVAL")
    # print("RGB output stats:", rgb_map.min().item(), rgb_map.max().item())
@@ -142,15 +168,12 @@ def render_from_model(model, rays_o, rays_d, device, near=0.1, far=4, N_samples=
 def render_rotating_gif_capture_poses(model, dataset, save_dir, device, near=0.1, far=4.0, every_n=1, N_samples=64):
    """Render a GIF using real camera poses from the LLFF dataset."""
    
-   scene_center = dataset.scene_center.to(device)
-   scene_scale = dataset.scene_scale.to(device)
-   
    # Extract all of the poses
    c2ws = torch.stack([pose.squeeze(0) for pose in dataset.poses]).to(device)
    num_poses = len(c2ws)
    
    # Select indices to interpolate
-   desired_num_poses = min(20, num_poses)
+   desired_num_poses = min(100, num_poses)
    selected_indices = torch.linspace(0, num_poses - 1, steps=desired_num_poses)
    frames = []
    os.makedirs(save_dir, exist_ok=True)
@@ -158,25 +181,33 @@ def render_rotating_gif_capture_poses(model, dataset, save_dir, device, near=0.1
    print(f"Generating rotating view GIF from {len(dataset.poses)} poses...")
 
    frames = []
-   steps = 60
+   steps = 99
    
    print(f"Steps {steps}, len(selected_c2ws)-1 {len(selected_indices) - 1}.  Quotient {steps // (len(selected_indices) - 1)}")
    for i in range(len(selected_indices) - 1):
       c2w_start = c2ws[int(selected_indices[i])]
       c2w_end = c2ws[int(selected_indices[i + 1])]
       
-      img, pose, focal, pp, img_wh = dataset[0]
+      img, pose, focal, pp, img_wh = dataset[int(selected_indices[i])]
       fl_x, fl_y = focal.squeeze(0).tolist()
       cx, cy = pp.squeeze(0).tolist()
       w, h = img_wh.squeeze(0).tolist()
       
+      # print("Start eye:", eye, "-> points at origin?", np.linalg.norm(eye) < 1e-3, "Norm:", np.linalg.norm(eye))
       for j in range(steps // (len(selected_indices) - 1)):
          t = j / (steps // (len(selected_indices) - 1))
+         
          c2w = interpolate_pose(c2w_start, c2w_end, t)
          c2w = torch.tensor(c2w)
+         c2w = renormalize_pose(c2w, dataset.scene_center, dataset.scene_scale,
+                                already_unit=(t in [0.0, 1.0]))
          
-         cam = Camera(eye=c2w[:, 3], 
-                      target=None, 
+         forward = -c2w[:3, 2]
+         eye = c2w[:3, 3]
+         target = eye + forward
+         
+         cam = Camera(eye=eye, 
+                      target=target, 
                       H=h, 
                       W=w, 
                       focal=(fl_x, fl_y), 
@@ -184,7 +215,7 @@ def render_rotating_gif_capture_poses(model, dataset, save_dir, device, near=0.1
          
          with torch.no_grad():
             rays_o, rays_d = cam.get_rays()
-            rgb_map = render_from_model(model, rays_o, rays_d, device, near, far, scene_center=scene_center, scene_scale=scene_scale)
+            rgb_map = render_from_model(model, rays_o, rays_d, device, near, far)
             
             img = (rgb_map.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)         
             frames.append(Image.fromarray(img))
@@ -193,7 +224,7 @@ def render_rotating_gif_capture_poses(model, dataset, save_dir, device, near=0.1
          torch.cuda.empty_cache()
 
    gif_path = os.path.join(save_dir, "rotating_capture.gif")
-   frames[0].save(gif_path, save_all=True, append_images=frames[1:], duration=100, loop=0)
+   frames[0].save(gif_path, save_all=True, append_images=frames[1:], duration=300, loop=0)
    print(f"Saved LLFF trajectory GIF to {gif_path}")
 
 def evaluate_real_scene(result_dir, data_dir, image_idx=0, N_samples=64, near=0.1, far=4.0):
@@ -226,9 +257,6 @@ def evaluate_real_scene(result_dir, data_dir, image_idx=0, N_samples=64, near=0.
 
    dataset = NeRFCaptureDataset(scene_dir=data_dir, split='train', subset=None)
    
-   scene_center = dataset.scene_center.to(device)
-   scene_scale = dataset.scene_scale.to(device)
-   
    sample = dataset[0]
    rgb_gt, pose, focal, pp, img_wh = sample
             
@@ -246,7 +274,7 @@ def evaluate_real_scene(result_dir, data_dir, image_idx=0, N_samples=64, near=0.
    rays_o, rays_d = cam.get_rays()
    
    with torch.no_grad():
-      rgb_map = render_from_model(model, rays_o, rays_d, device, near, far, scene_center=scene_center, scene_scale=scene_scale)
+      rgb_map = render_from_model(model, rays_o, rays_d, device, near, far)
    
    # Save outputs
    out_dir = os.path.join(result_dir, "plots", "real_eval")
@@ -288,4 +316,4 @@ if __name__ == '__main__':
 
    data_dir = "./data/skow/robot"
    result_dir = sys.argv[1]
-   evaluate_real_scene(result_dir, data_dir, image_idx=0, N_samples=64, near=0.1, far=1.0)
+   evaluate_real_scene(result_dir, data_dir, image_idx=0, N_samples=64, near=0.05, far=1.2)

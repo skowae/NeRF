@@ -9,7 +9,6 @@ def look_at_camera(eye, target, up=None):
    target = target.float()
 
    forward = target - eye
-   forward = target - eye
    forward = forward / torch.norm(forward)
 
    if up is None:
@@ -89,7 +88,7 @@ class Camera:
       return pts, z_vals
 
    @staticmethod
-   def volume_render(rgb, sigma, z_vals):
+   def volume_render(rgb, sigma, z_vals, white_bkgd=False):
       device = rgb.device
       
       # Move everything to same device
@@ -99,22 +98,29 @@ class Camera:
       H, W, N_samples = sigma.shape
 
       dists = z_vals[..., 1:] - z_vals[..., :-1]
-      dists = torch.cat([dists, torch.full_like(dists[..., :1], 1e10)], dim=-1)
+      dists = torch.cat([dists, torch.full_like(dists[..., :1], 1e5)], dim=-1)
 
       alpha = 1.0 - torch.exp(-sigma * dists)
       
-      ones = torch.ones((H, W, 1), device=device)
-      eps = torch.tensor(1e-10, device=device)
-      one = torch.tensor(1.0, device=device)
-         
-      T = torch.cumprod(torch.cat([
-         ones,
-         one - alpha + eps
-    
-      ], dim=-1), dim=-1)[..., :-1]
+      # ones = torch.ones((H, W, 1), device=device)
+      # eps = 1e-10
+      # one = torch.tensor(1.0, device=device)
       
-      weights = alpha * T
-      final_rgb = torch.sum(weights[..., None] * rgb, dim=-2)
+      trans = torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]), 
+                                       1.0 - alpha + 1e-10], dim=-1),
+                            dim=-1)[..., :-1]
+         
+      # T = torch.cumprod(torch.cat([
+      #    ones,
+      #    one - alpha + eps
+    
+      # ], dim=-1), dim=-1)[..., :-1]
+      
+      weights = alpha * trans
+      final_rgb = torch.sum(weights[..., None] * rgb, dim=-2) # (H, W, 3)
+      
+      if white_bkgd:
+         final_rgb = final_rgb + (1.0 - weights.sum(dim=-1, keepdim=True))
 
       # print("Image min:", final_rgb.min().item(), "max:", final_rgb.max().item())
       # print("Max alpha:", alpha.max().item())

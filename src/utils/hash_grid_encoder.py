@@ -36,8 +36,8 @@ class HashGridEncoder(nn.Module):
       
       self.register_buffer('primes', torch.tensor([1, 2654435761, 805459861], dtype=torch.long))
    
-   def hash_fn(self, coords):
-      return ((coords*self.primes).sum(dim=-1) & 0xFFFFFFFF)%self.embeddings[0].num_embeddings
+   def hash_fn(self, coords, size):
+      return ((coords*self.primes).sum(dim=-1) & 0xFFFFFFFF)%size
    
    def forward(self, x):
       """Forward function
@@ -67,16 +67,19 @@ class HashGridEncoder(nn.Module):
          # Make sure the poses are in bounds
          pos_0 = pos_0%res
          pos_1 = pos_1%res
+         
+         # Determine the table size
+         table_size = min(self.hash_size, res**3)
+         
          # Unpack the points efficiently
-
-         c_000 = self.hash_fn(torch.cat([pos_0[..., 0:1], pos_0[..., 1:2], pos_0[..., 2:3]], dim=-1))
-         c_001 = self.hash_fn(torch.cat([pos_0[..., 0:1], pos_0[..., 1:2], pos_1[..., 2:3]], dim=-1))
-         c_010 = self.hash_fn(torch.cat([pos_0[..., 0:1], pos_1[..., 1:2], pos_0[..., 2:3]], dim=-1))
-         c_011 = self.hash_fn(torch.cat([pos_0[..., 0:1], pos_1[..., 1:2], pos_1[..., 2:3]], dim=-1))
-         c_100 = self.hash_fn(torch.cat([pos_1[..., 0:1], pos_0[..., 1:2], pos_0[..., 2:3]], dim=-1))
-         c_101 = self.hash_fn(torch.cat([pos_1[..., 0:1], pos_0[..., 1:2], pos_1[..., 2:3]], dim=-1))
-         c_110 = self.hash_fn(torch.cat([pos_1[..., 0:1], pos_1[..., 1:2], pos_0[..., 2:3]], dim=-1))
-         c_111 = self.hash_fn(torch.cat([pos_1[..., 0:1], pos_1[..., 1:2], pos_1[..., 2:3]], dim=-1))
+         c_000 = self.hash_fn(torch.cat([pos_0[..., 0:1], pos_0[..., 1:2], pos_0[..., 2:3]], dim=-1), table_size)
+         c_001 = self.hash_fn(torch.cat([pos_0[..., 0:1], pos_0[..., 1:2], pos_1[..., 2:3]], dim=-1), table_size)
+         c_010 = self.hash_fn(torch.cat([pos_0[..., 0:1], pos_1[..., 1:2], pos_0[..., 2:3]], dim=-1), table_size)
+         c_011 = self.hash_fn(torch.cat([pos_0[..., 0:1], pos_1[..., 1:2], pos_1[..., 2:3]], dim=-1), table_size)
+         c_100 = self.hash_fn(torch.cat([pos_1[..., 0:1], pos_0[..., 1:2], pos_0[..., 2:3]], dim=-1), table_size)
+         c_101 = self.hash_fn(torch.cat([pos_1[..., 0:1], pos_0[..., 1:2], pos_1[..., 2:3]], dim=-1), table_size)
+         c_110 = self.hash_fn(torch.cat([pos_1[..., 0:1], pos_1[..., 1:2], pos_0[..., 2:3]], dim=-1), table_size)
+         c_111 = self.hash_fn(torch.cat([pos_1[..., 0:1], pos_1[..., 1:2], pos_1[..., 2:3]], dim=-1), table_size)
          
          # Now retrieve the embeddings
          f_000 = emb(c_000)

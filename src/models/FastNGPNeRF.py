@@ -60,6 +60,7 @@ class FastNGPNeRF(nn.Module):
          if isinstance(layer, torch.nn.Linear):
             torch.nn.init.normal_(layer.weight, mean=0.0, std=1e-4)
             torch.nn.init.constant_(layer.bias, 0)
+      torch.nn.init.constant_(self.fc_density[2].bias, 1.5)
       
       # Small MLP to predict RGB
       input_dim_color = 15 + self.dir_encoder.output_dims      
@@ -72,6 +73,8 @@ class FastNGPNeRF(nn.Module):
          if isinstance(layer, torch.nn.Linear):
             torch.nn.init.normal_(layer.weight, mean=0.0, std=1e-4)
             torch.nn.init.constant_(layer.bias, 0)
+            
+      self.skip_proj = nn.Linear(15, hidden_dim, bias=False)
       
    def forward(self, x, view_dirs=None):
       """Forward call.  Inference
@@ -81,20 +84,27 @@ class FastNGPNeRF(nn.Module):
           view_dirs (N, 3): Normalized viewing directions. Defaults to None.
       """
       
-      x_encoded = self.hash_encoder(x)
+      x_encoded = self.hash_encoder(x) # (N, C)
       
+      # Tiny cuda-ngp "truncated-exp" density
+      density_raw = self.fc_density(x_encoded) # (N, 1 + F)
+      sigma_raw = density_raw[..., 0] + 1.5 # bias = 1.5
+      sigma = torch.nn.functional.softplus(sigma_raw, beta=1)
+      
+      features = density_raw[..., 1:] # (N, 15)
+      
+      # Skip connections into the color head
       if view_dirs is not None:
          view_dirs = view_dirs / view_dirs.norm(dim=-1, keepdim=True)
          d_encoded = self.dir_encoder(view_dirs)
       else:
          with torch.no_grad():
-            d_encoded = torch.zeros(x.shape[0], self.dir_encoder.output_dims, device=x.device)
+            d_encoded = torch.zeros(x.shape[0], self.dir_encoder.output_dims, 
+                                    device=x.device)
       
-      density_features = self.fc_density(x_encoded)
-      sigma = torch.relu(density_features[..., 0])
-      features = density_features[..., 1:]
-      
-      color_input = torch.cat([features, d_encoded], dim=-1)
-      rgb = torch.sigmoid(self.fc_color(color_input))
+      color_in = torch.cat([features, d_encoded], dim=-1)
+      h = self.fc_color[0](color_in) + self.skip_proj(features) # skip -> first linear
+      h = torch.relu(h)
+      rgb = torch.sigmoid(self.fc_color[2](h)) # Final linear
       
       return rgb, sigma
