@@ -108,3 +108,18 @@ class FastNGPNeRF(nn.Module):
       rgb = torch.sigmoid(self.fc_color[2](h)) # Final linear
       
       return rgb, sigma
+
+   @torch.no_grad()
+   def query_density(self, x):
+      """
+
+      Args:
+          x (N,3): points in [-1, 1] unit cube (same range you feed the MLP)
+      Returns: sigma(x) WITHOUT tracking gradients
+      """
+      
+      x_enc = self.hash_encoder(x)  # (N,C)
+      raw = self.fc_density(x_enc)[:, 0] + 1.5 # bias
+      sigma = torch.nn.functional.softplus(raw, beta=1)
+      return sigma
+      

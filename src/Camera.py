@@ -62,14 +62,67 @@ class Camera:
       dirs = torch.stack([
          (i - cx) / self.focal[0],
          -(j - cy) / self.focal[1],
-         torch.ones_like(i)
+         -torch.ones_like(i)
       ], dim=-1)
-
+      
       rays_d = torch.sum(dirs[..., None, :] * self.c2w[:3, :3], dim=-1)
       rays_d = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)
       rays_o = self.c2w[:3, 3].expand_as(rays_d)
 
       return rays_o, rays_d
+
+   @staticmethod
+   def axis_angle_to_matrix(axis, theta):
+      """Rodrigues rotation formula (vectorized).
+
+      Args:
+          axis (..., 3): unit vectors
+          theta (...,): rotation angle in radians
+
+      Returns:
+          R (..., 3, 3): rotation matrices
+      """
+      axis = axis/axis.norm(dim=-1, keepdim=True).clamp(min=1e-9)
+      ax, ay, az = axis.unbind(-1)
+      c = torch.cos(theta)
+      s = torch.sin(theta)
+      C = 1.0 - c
+      
+      R = torch.stack([
+         c + ax*ax*C,    ax*ay*C - az*s, ax*az*C + ay*s,
+         ay*ax*C + az*s,    c + ay*ay*C, ay*az*C - ax*s,
+         az*ax*C - ay*s, az*ay*C + ax*s,    c + az*az*C
+      ], dim=-1).reshape(axis.shape[:-1] + (3, 3))
+      return R
+   
+   @staticmethod
+   def look_at_to_matrix(eye, target, up=None):
+      """Build a camera-to-world matrix for meye/target/up. Returns a 3x4 
+      tensor: [R | t] in your existing convention.  All tensors must be on the 
+      same device & dtype
+
+      Args:
+          eye (_type_): camera pose
+          target (_type_): target pose
+          up (_type_, optional): _description_. Defaults to None.
+
+      Returns:
+          _type_: _description_
+      """
+      if up is None:
+         up = torch.tensor([0., 1., 0.], dtype=eye.dtype, device=eye.device)
+         
+      forward = (target - eye)
+      forward = forward/forward.norm(dim=-1, keepdim=True).clamp(min=1e-9)
+      
+      right = torch.cross(up.expand_as(forward), forward, dim=-1)
+      right = right/right.norm(dim=-1, keepdim=True).clamp(min=1e-9)
+      
+      true_up = torch.cross(forward, right, dim=-1)
+      
+      R = torch.stack([right, true_up, forward], dim=-1) # (.., 3, 3)
+      t = eye.unsqueeze(-1)   # (..., 3, 1)
+      return torch.cat([R, t], dim=-1)
 
    @staticmethod
    def sample_points_along_rays(rays_o, rays_d, near, far, N_samples, perturb=True):
@@ -129,10 +182,10 @@ class Camera:
 
       return final_rgb, weights
 
-   def visualize_corner_rays(self, rays_o, rays_d, xlim=2, ylim=2, zlim=2):
+   def visualize_corner_rays(self, rays_o, rays_d, obj_center, xlim=1, ylim=1, zlim=1):
       fig = plt.figure()
       ax = fig.add_subplot(111, projection='3d')
-      ax.scatter(0, 0, 0, color='black', label='Origin', s=50)
+      ax.scatter(obj_center[0], obj_center[1], obj_center[2], color='black', label='Origin', s=50)
       ax.quiver(*rays_o[0, 0], *rays_d[0, 0], color='r', length=1.0)
       ax.quiver(*rays_o[0, -1], *rays_d[0, -1], color='g', length=1.0)
       ax.quiver(*rays_o[-1, 0], *rays_d[-1, 0], color='b', length=1.0)
@@ -141,4 +194,7 @@ class Camera:
       ax.set_xlim([-xlim, xlim])
       ax.set_ylim([-ylim, ylim])
       ax.set_zlim([-zlim, zlim])
+      ax.set_xlabel('X')
+      ax.set_ylabel('Y')
+      ax.set_zlabel('Z')
       plt.show()
